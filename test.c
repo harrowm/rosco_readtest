@@ -1,23 +1,30 @@
-// File to test reading and writing to a SD Cards on the rosco_m68k
+// File to test reading from a SD Cards on the rosco_m68k
 // Malcolm Harrow November 2023
 // MIT license
 
-// You can run this from your PC/Mac with:
-//     cc test.c -o test (ha!)
-// To compile for the rosco_m68k use:
+// First run this on your PC/Mac with:
+//     cc test.c -o test 
+//     ./test
+// Compile for the rosco_m68k use:
 //     ROSCO_M68K_DIR=~/rosco_m68k make EXTRA_CFLAGS=-DROSCO=1
+// Copy all the files across to the SD Card with:
+//     cp readtest* /Volumes/SDCARD
+//     cp rosco_readtest.bin /Volumes/SDCARD
+// Run rosco_readtest.bin on the rosco_m68k
 
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifdef ROSCO
 #define USE_FILELIB_STDIO_COMPAT_NAMES 1
 #include <sdfat.h>
+#endif
+
+#define DATASIZE 64*1024
+#define TIMES_TO_READ 20
+#define NUMBER_FILES 5 
 
 #define _TIMER_100HZ  0x40c
-
-#define DATASIZE 8*1024
-#define TIMES_TO_WRITE 100
-
 int simpletimer() {
 #ifdef ROSCO
     return *(int *)_TIMER_100HZ;
@@ -93,97 +100,175 @@ int kmain() {
         printf("Failed to initialise SD Card Library\n");
     }
 
-    printf("Init SD Card ok, creating test data set\n");
-#else
-int main() {
-#endif
-    char dataset[DATASIZE];
+    printf("Init SD Card ok, starting read test\n");
 
-    for (int i = 0; i<DATASIZE; i++) {
-        dataset[i] = i & 0xFF;
+    FILE *fp = NULL;
+    char fname[14];
+    int success = 0;
+    char dataset[DATASIZE];
+    unsigned int crc[NUMBER_FILES];
+
+    if ((fp = fopen("/readtest.crc", "r")) == NULL) {
+        printf("Failed to open crc file.\n");
+        printf("First compile and run this on your PC/Mac and\n");
+        printf("then copy the test files and crc file to your SD Card.\n");
+        printf("You can then run the read test from on the rosco_m68k.\n");
+        exit(1);
     }
 
-    unsigned int c = crc32b(0, dataset, DATASIZE);
-    printf("Running test for file size %d and %d times\n", DATASIZE, TIMES_TO_WRITE);
-    printf("crc32 of dataset is %08x\n", c);
+    int res = fread(crc, sizeof(int), NUMBER_FILES, fp);
+    if (res != NUMBER_FILES * sizeof(int)) {
+        printf("Failed to read %d crcs from the crc file\n", NUMBER_FILES);
+        exit(1);
+    }
 
-    int success = 0;
-    FILE *fp = NULL;
-    char fname[10];
-    int res = 0;
+    fclose(fp);
 
-    for (int i = 0; i<TIMES_TO_WRITE; i++) {
-#ifdef ROSCO
-        snprintf(fname, 10, "/rosco%03d", i);
+    for (int i = 0; i<TIMES_TO_READ; i++) {
+        printf("Run %3d: ", i);
+        for (int j = 0; j<NUMBER_FILES; j++) {
+            snprintf(fname, 14, "/readtest%03d", j);
+            printf(" %s: time: %d ", fname, simpletimer());
+            if ((fp = fopen(fname, "r")) == NULL) {
+                printf("Failed to open for read '%s'\n", fname);
+                continue;
+            }
+
+            res = fread(dataset, DATASIZE, 1, fp);
+            if (res != DATASIZE) {
+                printf("Failed to read a complete dataset '%s'\n", fname);
+                continue;
+            }
+
+            unsigned int c2 = crc32b(0, dataset, DATASIZE);
+
+            if (crc[j] != __builtin_bswap32(c2)) {
+                printf("Read completed but checksums are different '%s'\n", fname);
+                printf("From file %08x, calculated %08lx\n", crc[j], __builtin_bswap32(c2));
+                continue;
+            }
+
+            fclose(fp);
+            success++;
+        }
+        printf("ok\n");
+    }
+    printf("Test completed\n");
+    printf("%d files read, %d success\n", TIMES_TO_READ * NUMBER_FILES, success);
+
+    return (TIMES_TO_READ * NUMBER_FILES) == success;
+}
 #else
-        snprintf(fname, 10, "rosco%03d", i);
-#endif
-        printf("%s: time: %d write ", fname, simpletimer());
+int main() {
+    FILE *fp = NULL;
+    char fname[13];
+    int res = 0;
+    unsigned int crc[NUMBER_FILES];
+    unsigned int c = 0;
+    char dataset[DATASIZE];
+    
+    for (int j = 0; j<NUMBER_FILES; j++) {
+        snprintf(fname, 12, "readtest%03d", j);
+
         if ((fp = fopen(fname, "w")) == NULL) {
             printf("Failed to open for write '%s'\n", fname);
             continue;
         }
 
+        for (int i = 0; i<DATASIZE; i++) {
+            dataset[i] = (i + j) & 0xFF;
+        }
+
+        crc[j] = crc32b(0, dataset, DATASIZE);
         res = fwrite(dataset, DATASIZE, 1, fp);
-#ifdef ROSCO
-        if (res != DATASIZE * 1) {
-#else
         if (res != 1) {
-#endif
             printf("Failed to write a complete dataset '%s'\n", fname);
             continue;
         }
 
         fclose(fp);
-
-        printf("read ");
-        if ((fp = fopen(fname, "r")) == NULL) {
-            printf("Failed to open for read '%s'\n", fname);
-            continue;
-        }
-
-        res = fread(dataset, DATASIZE, 1, fp);
-#ifdef ROSCO
-        if (res != DATASIZE * 1) {
-#else
-        if (res != 1) {
-#endif
-            printf("Failed to read a complete dataset '%s'\n", fname);
-            continue;
-        }
-
-        unsigned int c2 = crc32b(0, dataset, DATASIZE);
-
-        if (c != c2) {
-            printf("Read completed but checksums are different '%s'\n", fname);
-
-            // recreate dataset as now corrupt
-            for (int i = 0; i<DATASIZE; i++) {
-                dataset[i] = i & 0xFF;
-            }
-
-            c2 = crc32b(0, dataset, DATASIZE);
-            if (c2 != c) {
-                printf("FATAL: failed to create dataset with same crc as before\n");
-                exit(1);
-            }
-            continue;
-        }
-
-        fclose(fp);
-
-        if (remove(fname)) {
-            printf("Failed to remove '%s'\n", fname);
-            continue;
-        }
-
-        printf("remove ok\n");
-       
-        success++;
     }
 
-    printf("Test completed\n");
-    printf("%d test runs, %d success\n", TIMES_TO_WRITE, success);
+    if ((fp = fopen("readtest.crc", "w")) == NULL) {
+        printf("Failed to open crc file for write.\n");
+        exit(1);
+    }
+
+    res = fwrite(crc, sizeof(int), NUMBER_FILES, fp);
+    if (res != NUMBER_FILES) {
+        printf("Failed to write %d crcs to the crc file\n", NUMBER_FILES);
+        exit(1);
+    }
+
+    fclose(fp);
+
     
-    return (TIMES_TO_WRITE == success);
+    // ---
+    
+
+    // FILE *fp = NULL;
+    // char fname[13];
+    int success = 0;
+    // char dataset[DATASIZE];
+    // unsigned int crc[NUMBER_FILES];
+
+    if ((fp = fopen("readtest.crc", "r")) == NULL) {
+        printf("Failed to open crc file.\n");
+        printf("First compile and run this on your PC/Mac and\n");
+        printf("then copy the test files and crc file to your SD Card.\n");
+        printf("You can then run the read test from on the rosco_m68k.\n");
+        exit(1);
+    }
+
+    res = fread(crc, sizeof(int), NUMBER_FILES, fp);
+    if (res != NUMBER_FILES) {
+        printf("Failed to read %d crcs from the crc file\n", NUMBER_FILES);
+        exit(1);
+    }
+
+    fclose(fp);
+
+    for (int i = 0; i<TIMES_TO_READ; i++) {
+        printf("Run %3d: ", i);
+        for (int j = 0; j<NUMBER_FILES; j++) {
+            snprintf(fname, 12, "readtest%03d", j);
+            printf(" %s: time: %d ", fname, simpletimer());
+            if ((fp = fopen(fname, "r")) == NULL) {
+                printf("Failed to open for read '%s'\n", fname);
+                continue;
+            }
+
+            res = fread(dataset, DATASIZE, 1, fp);
+            if (res != 1) {
+                printf("Failed to read a complete dataset '%s'\n", fname);
+                continue;
+            }
+
+            unsigned int c2 = crc32b(0, dataset, DATASIZE);
+
+            if (crc[j] != c2) {
+                printf("Read completed but checksums are different '%s'\n", fname);
+                continue;
+            }
+
+            fclose(fp);
+            success++;
+        }
+        printf("ok\n");
+    }
+    printf("Test completed\n");
+    printf("%d files read, %d success\n", TIMES_TO_READ * NUMBER_FILES, success);
+    
+    if ((TIMES_TO_READ * NUMBER_FILES) != success) {
+        printf("Test failed, code issue ?\n");
+        exit(1);
+    }
+
+    printf("Completed file creation and test run successfully\n");
+    printf("Now compile the program for the rosco_m6k with:\n");
+    printf("    ROSCO_M68K_DIR=~/rosco_m68k make EXTRA_CFLAGS=-DROSCO=1\n");
+    printf("copy readtest* and rosco_readtest.bin to your SD Card and run rosco_readtest.bin on the rosco_m68k\n");
+    
+    return 0;
 }
+#endif
